@@ -5,54 +5,59 @@ import argparse
 import json
 import subprocess
 
-FAKE_STORCLI_OUT={'call':'tests/input_call.json',
-                  'call_dall':'tests/input_call_dall.json',
-                  'call_eall_sall':'tests/input_call_eall_sall.json'}
+FAKE_STORCLI_OUT = {'call': 'tests/input_call.json',
+                    'call_dall': 'tests/input_call_dall.json',
+                    'call_eall_sall': 'tests/input_call_eall_sall.json'}
 
 PD_STATES = ['onln', 'ugood', 'ubad', 'msng']
 VD_STATES = ['optl', 'dgrd']
-STORCLI_PATH = ['/opt/MegaRAID/storcli']
-STORCLI_BIN_NAME = 'storcli64'
+
+
+class RaidCli(object):
+    def __init__(self, tool_name='storcli64', tool_path='/opt/MegaRAID/storcli'):
+        self.tool_name = tool_name
+        self.tool_path = tool_path
+        self.binary = self.find_binary()
+
+    # https://gist.github.com/SEJeff/2576984
+    def find_binary(self):
+        """Looks for file and return it's path"""
+
+        if os.access(self.tool_name, os.X_OK):
+            return os.path.realpath(self.tool_name)
+        _split_path_list = os.environ.get('PATH').split(os.pathsep)
+        _split_path_list.append(self.tool_path)
+        for system_path in _split_path_list:
+            full_path = os.path.join(system_path, self.tool_name)
+            if os.access(full_path, os.X_OK):
+                return full_path
+        raise RuntimeError('Can not find StorCLI binary `{}`'.format(self.tool_name))
+
+    def get_data(self, cmd_args='/call show J'):
+        data = subprocess.check_output(
+            [self.binary, cmd_args],
+            stderr=subprocess.STDOUT)
+        return data
+
+    def get_storcli_version(self):
+        tool_version = self.get_data(cmd_args='-v')
+        return self.binary, tool_version
+
 
 def get_drives(fakeinput=FAKE_STORCLI_OUT['call_eall_sall']):
     with open(fakeinput, 'r') as f:
         data = json.load(f)
     return data
 
-# https://gist.github.com/SEJeff/2576984
-def find_binary(exe=None):
-    '''
-    Looks for file and return it's path
-    '''
-    if exe:
-        (path, name) = os.path.split(exe)
-        if os.access(exe, os.X_OK):
-            return os.path.realpath(exe)
-        for path in STORCLI_PATH + os.environ.get('PATH').split(os.pathsep):
-            full_path = os.path.join(path, exe)
-            if os.access(full_path, os.X_OK):
-                return full_path
-    raise RuntimeError('Can not find StorCLI binary `{}`'.format(exe))
-
-def get_data(cmd_args='/call show J'):
-    cmd = find_binary(STORCLI_BIN_NAME)
-    data = subprocess.check_output(
-        [cmd, cmd_args],
-        stderr=subprocess.STDOUT)
-    return data
-
-def get_storcli_version():
-    cmd = find_binary(STORCLI_BIN_NAME)
-    version = get_data('-v')
-    return (cmd, version)
 
 def apply_tf(data, tf):
     """Apply function `tf` (transformation function) if specified
     and return result. Return unmodified data in other case"""
     if tf:
-      return tf(data)
+        return tf(data)
     else:
-      return data
+        return data
+
 
 def get_filtered(data, rules={}):
     """Filters out or modifies keys/values of dict
@@ -87,6 +92,7 @@ def get_filtered(data, rules={}):
             result[oldname] = apply_tf(data[oldname], tf)
     return result
 
+
 def remap_to_int(value, mapping_list):
     """Change value to it's int equivalent
     Args:
@@ -103,14 +109,18 @@ def remap_to_int(value, mapping_list):
     except ValueError:
         return 65534
 
+
 def pd_states(value):
     return remap_to_int(value, PD_STATES)
+
 
 def vd_states(value):
     return remap_to_int(value, VD_STATES)
 
+
 def rstrip(string):
     return string.rstrip()
+
 
 PD_FILTER_RULES = {'DID': (None, str),
                    'State': ('state', pd_states),
@@ -135,6 +145,7 @@ TELEGRAF_CONF = '''
 
   tag_keys = {tag_keys}
 '''
+
 
 def get_sample_telegraf_conf(progname):
     """Generates example config for Telegraf
@@ -165,6 +176,7 @@ def get_sample_telegraf_conf(progname):
     ## dirty way to add identation to last line of preatty json string
     print TELEGRAF_CONF.format(progname=progname, tag_keys=both[:-1]+'  ]')
 
+
 def to_pretty_json(value):
     """Returns preatty json list"""
     if type(value) == list:
@@ -176,113 +188,119 @@ def to_pretty_json(value):
                 
 
 class StorcliBaseWrapper(object):
-  """TODO """
-  _cmd_status = {}
-  _pd_list = {}
-  _vd_list = {}
-  _pd_count = {}
-  _vd_count = {}
-  _missing_count = {}
-  _PD_FILTER_RULES = PD_FILTER_RULES
-  _VD_FILTER_RULES = VD_FILTER_RULES
+    """TODO """
+    _cmd_status = {}
+    _pd_list = {}
+    _vd_list = {}
+    _pd_count = {}
+    _vd_count = {}
+    _missing_count = {}
+    _PD_FILTER_RULES = PD_FILTER_RULES
+    _VD_FILTER_RULES = VD_FILTER_RULES
 
-  def __init__(self, filename=None):
-    """ TODO """
-    if filename:
-        with open(filename, 'r') as f:
-            self._data = json.load(f)
-    else:
-        self._data = json.loads(get_data())
+    def __init__(self, raid_cli, filename=None):
+        """ raid_cli should be an object that has method get_data, which returns json
+        with raid information for further processing"""
+        if filename:
+            with open(filename, 'r') as f:
+                self._data = json.load(f)
+        else:
+            self._data = json.loads(raid_cli.get_data())
 
-    controllers = self._data.get('Controllers')
-    for ctl in controllers:
-      ctl_id = ctl.get('Command Status').get('Controller')
-      self._cmd_status[ctl_id] = ctl.get('Command Status', {}).get('Status')
-      err_description = ctl.get('Command Status', {}).get('Description')
-      err_details = ctl.get('Command Status', {}).get('Detailed Status')
-      if self._cmd_status[ctl_id] != 'Success':
-          raise RuntimeError(
-                    'Got error from controller. Error description: {}\n{}'.format(
-                         err_description,
-                         json.dumps(ctl.get('Command Status'),indent=4)
-                     )
-                )
-      self._pd_list[ctl_id] = ctl.get('Response Data', {}).get('PD LIST')
-      self._vd_list[ctl_id] = ctl.get('Response Data', {}).get('VD LIST')
-      self._pd_count[ctl_id] = ctl.get('Response Data', {}).get('Physical Drives')
-      self._vd_count[ctl_id] = ctl.get('Response Data', {}).get('Virtual Drives')
-      self._missing_count[ctl_id] = ctl.get('Response Data', {}).get('Missing Drives Count', 0)
+        controllers = self._data.get('Controllers')
+        for ctl in controllers:
+            ctl_id = ctl.get('Command Status').get('Controller')
+            self._cmd_status[ctl_id] = ctl.get('Command Status', {}).get('Status')
+            err_description = ctl.get('Command Status', {}).get('Description')
+            err_details = ctl.get('Command Status', {}).get('Detailed Status')
+            if self._cmd_status[ctl_id] != 'Success':
+                raise RuntimeError(
+                        'Got error from controller. Error description: {}\n{}'.format(
+                             err_description,
+                             json.dumps(ctl.get('Command Status'),indent=4)
+                         )
+                    )
+            self._pd_list[ctl_id] = ctl.get('Response Data', {}).get('PD LIST')
+            self._vd_list[ctl_id] = ctl.get('Response Data', {}).get('VD LIST')
+            self._pd_count[ctl_id] = ctl.get('Response Data', {}).get('Physical Drives')
+            self._vd_count[ctl_id] = ctl.get('Response Data', {}).get('Virtual Drives')
+            self._missing_count[ctl_id] = ctl.get('Response Data', {}).get('Missing Drives Count', 0)
 
-  @property
-  def pd(self, ctl=0):
-    result = [ get_filtered(pd, self._PD_FILTER_RULES) for pd in self.raw_pd ]
-    return json.dumps(result)
+    @property
+    def pd(self, ctl=0):
+        result = [ get_filtered(pd, self._PD_FILTER_RULES) for pd in self.raw_pd ]
+        return json.dumps(result)
 
-  @property
-  def raw_pd(self, ctl=0):
-    return self._pd_list[ctl]
+    @property
+    def raw_pd(self, ctl=0):
+        return self._pd_list[ctl]
 
-  @property
-  def vd(self, ctl=0):
-    result = [ get_filtered(vd, self._VD_FILTER_RULES) for vd in self.raw_vd ]
-    return json.dumps(result)
+    @property
+    def vd(self, ctl=0):
+        result = [ get_filtered(vd, self._VD_FILTER_RULES) for vd in self.raw_vd ]
+        return json.dumps(result)
 
-  @property
-  def raw_vd(self, ctl=0):
-    return self._vd_list[ctl]
+    @property
+    def raw_vd(self, ctl=0):
+        return self._vd_list[ctl]
 
-  @property
-  def pd_count(self, ctl=0):
-    return json.dumps(int(self._pd_count[ctl]))
+    @property
+    def pd_count(self, ctl=0):
+        return json.dumps(int(self._pd_count[ctl]))
 
-  @property
-  def raw_pd_count(self, ctl=0):
-    return int(self._pd_count[ctl])
+    @property
+    def raw_pd_count(self, ctl=0):
+        return int(self._pd_count[ctl])
 
-  @property
-  def vd_count(self, ctl=0):
-    return json.dumps(int(self._vd_count[ctl]))
+    @property
+    def vd_count(self, ctl=0):
+        return json.dumps(int(self._vd_count[ctl]))
 
-  @property
-  def raw_vd_count(self, ctl=0):
-    return int(self._vd_count[ctl])
+    @property
+    def raw_vd_count(self, ctl=0):
+        return int(self._vd_count[ctl])
 
-  @property
-  def missing_count(self, ctl=0):
-    result = {'pd_missing': int(self._missing_count[ctl])}
-    return json.dumps(result)
+    @property
+    def missing_count(self, ctl=0):
+        result = {'pd_missing': int(self._missing_count[ctl])}
+        return json.dumps(result)
 
-  @property
-  def raw_missing_count(self, ctl=0):
-    return int(self._missing_count[ctl])
+    @property
+    def raw_missing_count(self, ctl=0):
+        return int(self._missing_count[ctl])
+
 
 def get_cli_options():
-  """ Parse CLI options and return """
-  parser = argparse.ArgumentParser(description='Parser for LSI Storage Command Line Tool',
-                                   formatter_class=argparse.RawDescriptionHelpFormatter,
-                                   epilog=HELP_EPILOG)
-  group = parser.add_mutually_exclusive_group()
-  group.add_argument('--pd-list', action='store_true',
-                      help="Get status of Physical Drives (default mode)")
-  group.add_argument('--vd-list', action='store_true',
-                      help="Get status of Virtual Drives")
-  group.add_argument('--pd-count', action='store_true',
-                      help="Get number of Physical Drives")
-  group.add_argument('--vd-count', action='store_true',
-                      help="Get number of Virtual Drives")
-  group.add_argument('--missing-count', action='store_true',
-                      help="Get number of Missing(failed) drives")
-  group.add_argument('--sample-config', action='store_true',
-                      help="Show example config for Telegraf")
-  parser.add_argument('--file',
-                      help="JSON file to get data from file instead of "
-                           + "getting it from controller. "
-                           + "Usually you don't need this option")
-  parser.add_argument('--storcli-version', action='store_true',
-                      help="Get version and location of storcli tool")
+    """ Parse CLI options and return """
+    parser = argparse.ArgumentParser(description='Parser for LSI Storage Command Line Tool',
+                                     formatter_class=argparse.RawDescriptionHelpFormatter,
+                                     epilog=HELP_EPILOG)
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--pd-list', action='store_true',
+                       help="Get status of Physical Drives (default mode)")
+    group.add_argument('--vd-list', action='store_true',
+                       help="Get status of Virtual Drives")
+    group.add_argument('--pd-count', action='store_true',
+                       help="Get number of Physical Drives")
+    group.add_argument('--vd-count', action='store_true',
+                       help="Get number of Virtual Drives")
+    group.add_argument('--missing-count', action='store_true',
+                       help="Get number of Missing(failed) drives")
+    group.add_argument('--sample-config', action='store_true',
+                       help="Show example config for Telegraf")
+    parser.add_argument('--file',
+                        help="JSON file to get data from file instead of "
+                             "getting it from controller. "
+                             "Usually you don't need this option")
+    parser.add_argument('--binary-path', default='/opt/MegaRAID/storcli',
+                        help='Path to binary to be used to gather raid info')
+    parser.add_argument('--binary-name', default='storcli64',
+                        help='Name of the binary to be used to gather raid info')
+    parser.add_argument('--storcli-version', action='store_true',
+                        help="Get version and location of storcli tool")
 
-  args = parser.parse_args()
-  return (args, parser.prog)
+    return parser.parse_args(), parser.prog
+
 
 HELP_EPILOG = '''
   The tool is simple wrapper around Storage Command Line Tool.
@@ -339,37 +357,39 @@ HELP_EPILOG = '''
 '''
 
 if __name__ == "__main__":
-  args, progname = get_cli_options()
+    args, progname = get_cli_options()
 
-  if args.sample_config:
-    get_sample_telegraf_conf(progname)
-    sys.exit(0)
+    raid_tool = RaidCli(tool_name=args.binary_name, tool_path=args.binary_path)
 
-  if args.storcli_version:
-    path, version = get_storcli_version()
-    print('Storcli is located at: {}'. format(path))
-    print('Storcli version is: {}'. format(version))
-    sys.exit(0)
+    if args.sample_config:
+        get_sample_telegraf_conf(progname)
+        sys.exit(0)
 
-  try:
-    if args.file:
-      res = StorcliBaseWrapper(args.file)
+    if args.storcli_version:
+        path, version = raid_tool.get_storcli_version()
+        print('Storcli is located at: {}'. format(path))
+        print('Storcli version is: {}'. format(version))
+        sys.exit(0)
+
+    try:
+        if args.file:
+            res = StorcliBaseWrapper(raid_tool, filename=args.file)
+        else:
+            res = StorcliBaseWrapper(raid_tool)
+    except Exception, e:
+        sys.exit(e)
+
+    if args.pd_count:
+        print res.pd_count
+    elif args.vd_count:
+        print res.vd_count
+    elif args.missing_count:
+        print res.missing_count
+    elif args.vd_list:
+        print res.vd
+    elif args.pd_list:
+        print res.pd
     else:
-      res = StorcliBaseWrapper()
-  except Exception, e:
-    sys.exit(e)
+        print res.pd
 
-  if args.pd_count:
-    print res.pd_count
-  elif args.vd_count:
-    print res.vd_count
-  elif args.missing_count:
-    print res.missing_count
-  elif args.vd_list:
-    print res.vd
-  elif args.pd_list:
-    print res.pd
-  else:
-    print res.pd
-
-  sys.exit(0)
+    sys.exit(0)
